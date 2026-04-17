@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Online FIFO agent (stall-first + RL_DELTA_M).
+Online FIFO agent (stall-first + RL_DELTA_M / AIMD_STALL_ONLY).
 
 Self-audit:
 - stall_event is detected using delta/cumulative stall counters (or is_write_stopped==1, or delayed_rate>0).
 - SAFE MODE: on any stall_event, force m_cmd_effective=m_min immediately and keep it for HOLD_SEC.
 - RL_DELTA_M: in SAFE state, Linear Q-learning chooses delta action to update m; in
   SEMI_SAFE/UNSAFE, safety rules override.
+- AIMD_STALL_ONLY: in SAFE state, additive increase is applied every tick; after a
+  stall-induced SAFE hold, the first SAFE tick applies multiplicative decrease from
+  the pre-stall command, then resumes additive increase.
 - TD update is applied online with (s, a, r, s') transitions.
 """
 import argparse
@@ -606,7 +609,11 @@ def main() -> int:
     ap.add_argument("--recover_free_sec", type=float, default=20.0)
     ap.add_argument("--recover_step_sec", type=float, default=5.0)
     ap.add_argument("--ladder", default=",".join(str(v) for v in DEFAULT_LADDER))
-    ap.add_argument("--recover_controller_mode", choices=["RL_DELTA_M"], default="RL_DELTA_M")
+    ap.add_argument(
+        "--recover_controller_mode",
+        choices=["RL_DELTA_M", "AIMD_STALL_ONLY"],
+        default="RL_DELTA_M",
+    )
     ap.add_argument("--rl_action_mode", choices=["hold", "cycle", "file"], default="hold")
     ap.add_argument("--rl_action_file", default="")
     ap.add_argument("--delta_actions", default=",".join(str(v) for v in DEFAULT_DELTA_ACTIONS))
@@ -614,6 +621,8 @@ def main() -> int:
     ap.add_argument("--semi_safe_step", type=float, default=0.03)
     ap.add_argument("--semi_safe_floor", type=float, default=0.03)
     ap.add_argument("--delta_smooth_eta", type=float, default=0.18)
+    ap.add_argument("--aimd_ai_step", type=float, default=0.005)
+    ap.add_argument("--aimd_md_beta", type=float, default=0.7)
     ap.add_argument("--startup_force_sec", type=float, default=10.0)
     # online learning flags
     ap.add_argument("--rl_online_learning_enabled", action="store_true")
@@ -751,6 +760,8 @@ def main() -> int:
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(normalized_argv)
+    aimd_ai_step = max(0.0, float(args.aimd_ai_step))
+    aimd_md_beta = clamp(float(args.aimd_md_beta), 0.0, 1.0)
 
     metrics_csv = args.poller_csv or args.metrics_csv
     if not metrics_csv:
@@ -783,7 +794,8 @@ def main() -> int:
     out_dir = os.path.dirname(os.path.abspath(args.out_csv))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-        online_learning = True
+        online_learning = args.recover_controller_mode == "RL_DELTA_M"
+        variant_id = "RL_DELTA_M_ONLY" if online_learning else str(args.recover_controller_mode)
         run_duration_sec = float(args.timeout_sec)
         if run_duration_sec.is_integer():
             run_duration_sec = int(run_duration_sec)
@@ -792,7 +804,7 @@ def main() -> int:
             with open(snapshot_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
-                        "variant_id": "RL_DELTA_M_ONLY",
+                        "variant_id": variant_id,
                         "hard_safety": True,
                         "soft_safety": bool(args.soft_guard_enabled),
                         "shield_enabled": False,
@@ -836,6 +848,8 @@ def main() -> int:
                         "stall_penalty_C": float(args.stall_penalty_C),
                         "m_min": float(args.m_min),
                         "ladder": str(args.ladder),
+                        "aimd_ai_step": aimd_ai_step,
+                        "aimd_md_beta": aimd_md_beta,
                     },
                     f,
                     indent=2,
@@ -882,6 +896,8 @@ def main() -> int:
     prev_write_stall_hist_count = None
     last_fifo_sent_cmd = None
     last_fifo_send_ts = None
+    aimd_pending_decrease = False
+    aimd_last_decrease_base = float(args.m_min)
 
     try:
         with open(args.out_csv, "w", encoding="utf-8", newline="") as out_f:
@@ -1160,6 +1176,9 @@ def main() -> int:
                         soft_trigger = 1 if soft_trigger_streak_sec >= float(args.near_stall_trigger_consecutive_sec) else 0
     
                     if stall_event:
+                        if args.recover_controller_mode == "AIMD_STALL_ONLY":
+                            aimd_last_decrease_base = clamp(float(last_cmd), args.m_min, args.m_max)
+                            aimd_pending_decrease = True
                         last_stall_time = now
                         ladder_idx_current = 0
 
@@ -1291,7 +1310,7 @@ def main() -> int:
                     l0_files_used = l0_files
                     delayed_rate_used = delayed_rate
 
-                    # Candidate decision (RL_DELTA_M only)
+                    # Candidate decision (controller-mode specific)
                     decision_t0_ns = time.perf_counter_ns()
                     reason = "RULE_ONLY"
                     delta_action_idx = -1
@@ -1322,7 +1341,21 @@ def main() -> int:
                             m_candidate = max(semi_safe_floor, float(last_cmd) - float(args.semi_safe_step))
                             m_candidate = min(m_candidate, float(args.soft_guard_cap_value))
                         else:
-                            if trainable:
+                            if args.recover_controller_mode == "AIMD_STALL_ONLY":
+                                if aimd_pending_decrease:
+                                    m_candidate = clamp(
+                                        float(aimd_last_decrease_base) * aimd_md_beta,
+                                        args.m_min,
+                                        args.m_max,
+                                    )
+                                    reason = "AIMD_DECREASE"
+                                    aimd_pending_decrease = False
+                                else:
+                                    m_candidate = min(args.m_max, float(last_cmd) + aimd_ai_step)
+                                    reason = "AIMD_INCREASE"
+                                delta_value = m_candidate - float(last_cmd)
+                                m_target = m_candidate
+                            elif trainable:
                                 action_idx, qs = q_agent.select_action(s_t)
                                 q_max = float(np.max(qs)) if qs.size > 0 else 0.0
                                 delta_action_idx = max(0, min(len(delta_actions) - 1, int(action_idx)))
@@ -1405,7 +1438,11 @@ def main() -> int:
                         prev_done = None
                         prev_is_trainable = False
 
-                    policy_version_id = "linear_q"
+                    policy_version_id = (
+                        "linear_q"
+                        if args.recover_controller_mode == "RL_DELTA_M"
+                        else "aimd_stall_only"
+                    )
     
                     # Send command to RocksDB via FIFO using send-on-change semantics.
                     # Also resend periodically (heartbeat) and on observed apply mismatch.
