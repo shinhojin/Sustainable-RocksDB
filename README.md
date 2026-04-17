@@ -85,8 +85,8 @@ cd /path/to/Sustainable-RocksDB-temp
 
 bash srocksdb_scripts/run_agent_rl_LQ.sh \
   --db_path /path/to/db \
-  --options_file /path/to/Sustainable-RocksDB-temp/srocksdb_options/rl_options_a.ini \
-  --outdir /path/to/Sustainable-RocksDB-temp/srocksdb_evaluation/agent_rl_lq_$(date +%m%d_%H%M%S) \
+  --options_file /path/to/Sustainable-RocksDB/srocksdb_options/rl_options_a.ini \
+  --outdir /path/to/Sustainable-RocksDB/srocksdb_evaluation/agent_rl_lq_$(date +%m%d_%H%M%S) \
   --duration-sec 43200 \
   --write_mb_per_sec 500 \
   --value_size 1024
@@ -98,8 +98,8 @@ If you need to keep existing DB files:
 bash srocksdb_scripts/run_agent_rl_LQ.sh \
   --no-clear-db \
   --db_path /path/to/db \
-  --options_file /path/to/Sustainable-RocksDB-temp/srocksdb_options/rl_options_a.ini \
-  --outdir /path/to/Sustainable-RocksDB-temp/srocksdb_evaluation/no_clear_$(date +%m%d_%H%M%S)
+  --options_file /path/to/Sustainable-RocksDB/srocksdb_options/rl_options_a.ini \
+  --outdir /path/to/Sustainable-RocksDB/srocksdb_evaluation/no_clear_$(date +%m%d_%H%M%S)
 ```
 
 ## 6) Reproducing YCSB A-F Batch (`run_agent_rl_ycsb.sh`)
@@ -116,8 +116,8 @@ cd /path/to/Sustainable-RocksDB-temp
 
 bash srocksdb_scripts/run_agent_rl_ycsb.sh \
   --db_path /path/to/db \
-  --options_file /path/to/Sustainable-RocksDB-temp/srocksdb_options/rl_options_a.ini \
-  --outdir /path/to/Sustainable-RocksDB-temp/srocksdb_evaluation/ycsb_$(date +%m%d_%H%M%S) \
+  --options_file /path/to/Sustainable-RocksDB/srocksdb_options/rl_options_a.ini \
+  --outdir /path/to/Sustainable-RocksDB/srocksdb_evaluation/ycsb_$(date +%m%d_%H%M%S) \
   --load_record_count 50000000 \
   --run_duration_sec 3600 \
   --load_with_agent 1 \
