@@ -27,7 +27,7 @@ BASE_RATE_BPS=${BASE_RATE_BPS:-500000000}
 DELTA_MAX=${DELTA_MAX:-0.5}
 STEP_SEC=${STEP_SEC:-1.0}
 M_MIN=${M_MIN:-0.01}
-M_MAX=${M_MAX:-0.2}
+M_MAX=${M_MAX:-0.5}
 HOLD_SEC=${HOLD_SEC:-10}
 RECOVER_FREE_SEC=${RECOVER_FREE_SEC:-20}
 RECOVER_STEP_SEC=${RECOVER_STEP_SEC:-5}
@@ -43,12 +43,25 @@ SEMI_SAFE_FLOOR=${SEMI_SAFE_FLOOR:-0.02}
 DELTA_SMOOTH_ETA=${DELTA_SMOOTH_ETA:-0.2}
 AIMD_AI_STEP=${AIMD_AI_STEP:-0.005}
 AIMD_MD_BETA=${AIMD_MD_BETA:-0.7}
+PID_SIGNAL=${PID_SIGNAL:-backlog}
+PID_BACKLOG_TARGET_BYTES=${PID_BACKLOG_TARGET_BYTES:-12000000000}
+PID_BACKLOG_SCALE_BYTES=${PID_BACKLOG_SCALE_BYTES:-12000000000}
+PID_L0_TARGET_FILES=${PID_L0_TARGET_FILES:-8}
+PID_L0_SCALE_FILES=${PID_L0_SCALE_FILES:-8}
+PID_KP=${PID_KP:-0.02}
+PID_KI=${PID_KI:-0.004}
+PID_KD=${PID_KD:-0.01}
+PID_INTEGRAL_MIN=${PID_INTEGRAL_MIN:--4.0}
+PID_INTEGRAL_MAX=${PID_INTEGRAL_MAX:-4.0}
+PID_OUTPUT_MAX=${PID_OUTPUT_MAX:-0.03}
+
 STARTUP_FORCE_SEC=${STARTUP_FORCE_SEC:-10}
 
 RL_ONLINE_LEARNING_ENABLED=${RL_ONLINE_LEARNING_ENABLED:-0}
 RL_ONLINE_UPDATE_INTERVAL_STEPS=${RL_ONLINE_UPDATE_INTERVAL_STEPS:-200}
 RL_ONLINE_MIN_BUFFER_STEPS=${RL_ONLINE_MIN_BUFFER_STEPS:-1000}
 RL_EXPLORATION_EPSILON=${RL_EXPLORATION_EPSILON:-0.0}
+RL_EPSILON_SCHEDULE=${RL_EPSILON_SCHEDULE:-warmup_180}
 RL_GAMMA=${RL_GAMMA:-0.95}
 RL_ALPHA=${RL_ALPHA:-0.05}
 RL_LEARNING_RATE=${RL_LEARNING_RATE:-0.0001}
@@ -141,11 +154,23 @@ Options:
   --delta_smooth_eta N
   --aimd_ai_step N
   --aimd_md_beta N
+  --pid_signal STR
+  --pid_backlog_target_bytes N
+  --pid_backlog_scale_bytes N
+  --pid_l0_target_files N
+  --pid_l0_scale_files N
+  --pid_kp N
+  --pid_ki N
+  --pid_kd N
+  --pid_integral_min N
+  --pid_integral_max N
+  --pid_output_max N
   --startup_force_sec N
   --rl_online_learning_enabled
   --rl_online_update_interval_steps N
   --rl_online_min_buffer_steps N
   --rl_exploration_epsilon N
+  --rl_epsilon_schedule STR
   --rl_gamma N
   --rl_alpha N
   --rl_learning_rate N
@@ -241,11 +266,23 @@ while [[ $# -gt 0 ]]; do
     --delta_smooth_eta) DELTA_SMOOTH_ETA="$2"; shift 2;;
     --aimd_ai_step) AIMD_AI_STEP="$2"; shift 2;;
     --aimd_md_beta) AIMD_MD_BETA="$2"; shift 2;;
+    --pid_signal) PID_SIGNAL="$2"; shift 2;;
+    --pid_backlog_target_bytes) PID_BACKLOG_TARGET_BYTES="$2"; shift 2;;
+    --pid_backlog_scale_bytes) PID_BACKLOG_SCALE_BYTES="$2"; shift 2;;
+    --pid_l0_target_files) PID_L0_TARGET_FILES="$2"; shift 2;;
+    --pid_l0_scale_files) PID_L0_SCALE_FILES="$2"; shift 2;;
+    --pid_kp) PID_KP="$2"; shift 2;;
+    --pid_ki) PID_KI="$2"; shift 2;;
+    --pid_kd) PID_KD="$2"; shift 2;;
+    --pid_integral_min) PID_INTEGRAL_MIN="$2"; shift 2;;
+    --pid_integral_max) PID_INTEGRAL_MAX="$2"; shift 2;;
+    --pid_output_max) PID_OUTPUT_MAX="$2"; shift 2;;
     --startup_force_sec) STARTUP_FORCE_SEC="$2"; shift 2;;
     --rl_online_learning_enabled) RL_ONLINE_LEARNING_ENABLED=1; shift 1;;
     --rl_online_update_interval_steps) RL_ONLINE_UPDATE_INTERVAL_STEPS="$2"; shift 2;;
     --rl_online_min_buffer_steps) RL_ONLINE_MIN_BUFFER_STEPS="$2"; shift 2;;
     --rl_exploration_epsilon) RL_EXPLORATION_EPSILON="$2"; shift 2;;
+    --rl_epsilon_schedule) RL_EPSILON_SCHEDULE="$2"; shift 2;;
     --rl_gamma) RL_GAMMA="$2"; shift 2;;
     --rl_alpha) RL_ALPHA="$2"; shift 2;;
     --rl_learning_rate) RL_LEARNING_RATE="$2"; shift 2;;
@@ -427,8 +464,9 @@ echo "[fifo] LADDER=$LADDER"
 echo "[fifo] RECOVER_CONTROLLER_MODE=$RECOVER_CONTROLLER_MODE RL_ACTION_MODE=$RL_ACTION_MODE RL_ACTION_FILE=$RL_ACTION_FILE"
 echo "[fifo] DELTA_ACTIONS=$DELTA_ACTIONS DELTA_M_MAX=$DELTA_M_MAX SEMI_SAFE_STEP=$SEMI_SAFE_STEP SEMI_SAFE_FLOOR=$SEMI_SAFE_FLOOR DELTA_SMOOTH_ETA=$DELTA_SMOOTH_ETA"
 echo "[fifo] AIMD_AI_STEP=$AIMD_AI_STEP AIMD_MD_BETA=$AIMD_MD_BETA"
+echo "[fifo] PID_SIGNAL=$PID_SIGNAL PID_BACKLOG_TARGET_BYTES=$PID_BACKLOG_TARGET_BYTES PID_BACKLOG_SCALE_BYTES=$PID_BACKLOG_SCALE_BYTES PID_L0_TARGET_FILES=$PID_L0_TARGET_FILES PID_L0_SCALE_FILES=$PID_L0_SCALE_FILES"
 echo "[fifo] STARTUP_FORCE_SEC=$STARTUP_FORCE_SEC"
-echo "[fifo] RL_ONLINE_LEARNING_ENABLED=$RL_ONLINE_LEARNING_ENABLED RL_EXPLORATION_EPSILON=$RL_EXPLORATION_EPSILON RL_LR=$RL_LEARNING_RATE"
+echo "[fifo] RL_ONLINE_LEARNING_ENABLED=$RL_ONLINE_LEARNING_ENABLED RL_EXPLORATION_EPSILON=$RL_EXPLORATION_EPSILON RL_EPSILON_SCHEDULE=$RL_EPSILON_SCHEDULE RL_LR=$RL_LEARNING_RATE"
 echo "[fifo] RISK_BACKLOG_EPS=$RISK_BACKLOG_EPS RISK_LATENCY_EPS=$RISK_LATENCY_EPS"
 echo "[fifo] OUTDIR=$OUTDIR"
 
@@ -538,10 +576,22 @@ AGENT_ARGS=(
   --delta_smooth_eta "$DELTA_SMOOTH_ETA"
   --aimd_ai_step "$AIMD_AI_STEP"
   --aimd_md_beta "$AIMD_MD_BETA"
+  --pid_signal "$PID_SIGNAL"
+  --pid_backlog_target_bytes "$PID_BACKLOG_TARGET_BYTES"
+  --pid_backlog_scale_bytes "$PID_BACKLOG_SCALE_BYTES"
+  --pid_l0_target_files "$PID_L0_TARGET_FILES"
+  --pid_l0_scale_files "$PID_L0_SCALE_FILES"
+  --pid_kp "$PID_KP"
+  --pid_ki "$PID_KI"
+  --pid_kd "$PID_KD"
+  --pid_integral_min "$PID_INTEGRAL_MIN"
+  --pid_integral_max "$PID_INTEGRAL_MAX"
+  --pid_output_max "$PID_OUTPUT_MAX"
   --startup_force_sec "$STARTUP_FORCE_SEC"
   --rl_online_update_interval_steps "$RL_ONLINE_UPDATE_INTERVAL_STEPS"
   --rl_online_min_buffer_steps "$RL_ONLINE_MIN_BUFFER_STEPS"
   --rl_exploration_epsilon "$RL_EXPLORATION_EPSILON"
+  --rl_epsilon_schedule "$RL_EPSILON_SCHEDULE"
   --rl_gamma "$RL_GAMMA"
   --rl_alpha "$RL_ALPHA"
   --rl_learning_rate "$RL_LEARNING_RATE"

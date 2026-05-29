@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Online FIFO agent (stall-first + RL_DELTA_M / AIMD_STALL_ONLY).
+Online FIFO agent (stall-first + RL_DELTA_M / AIMD_STALL_ONLY / PID).
 
 Self-audit:
 - stall_event is detected using delta/cumulative stall counters (or is_write_stopped==1, or delayed_rate>0).
@@ -10,6 +10,8 @@ Self-audit:
 - AIMD_STALL_ONLY: in SAFE state, additive increase is applied every tick; after a
   stall-induced SAFE hold, the first SAFE tick applies multiplicative decrease from
   the pre-stall command, then resumes additive increase.
+- PID: in SAFE state, a PID controller adjusts m around either a pending-compaction
+  backlog target or an L0-file target; in SEMI_SAFE/UNSAFE, safety rules override.
 - TD update is applied online with (s, a, r, s') transitions.
 """
 import argparse
@@ -611,7 +613,7 @@ def main() -> int:
     ap.add_argument("--ladder", default=",".join(str(v) for v in DEFAULT_LADDER))
     ap.add_argument(
         "--recover_controller_mode",
-        choices=["RL_DELTA_M", "AIMD_STALL_ONLY"],
+        choices=["RL_DELTA_M", "AIMD_STALL_ONLY", "PID"],
         default="RL_DELTA_M",
     )
     ap.add_argument("--rl_action_mode", choices=["hold", "cycle", "file"], default="hold")
@@ -623,12 +625,33 @@ def main() -> int:
     ap.add_argument("--delta_smooth_eta", type=float, default=0.18)
     ap.add_argument("--aimd_ai_step", type=float, default=0.005)
     ap.add_argument("--aimd_md_beta", type=float, default=0.7)
+    ap.add_argument(
+        "--pid_signal",
+        choices=["backlog", "l0"],
+        default="backlog",
+        help="PID input signal: pending-compaction backlog or L0 file count",
+    )
+    ap.add_argument("--pid_backlog_target_bytes", type=float, default=12_000_000_000.0)
+    ap.add_argument("--pid_backlog_scale_bytes", type=float, default=12_000_000_000.0)
+    ap.add_argument("--pid_l0_target_files", type=float, default=8.0)
+    ap.add_argument("--pid_l0_scale_files", type=float, default=8.0)
+    ap.add_argument("--pid_kp", type=float, default=0.02)
+    ap.add_argument("--pid_ki", type=float, default=0.004)
+    ap.add_argument("--pid_kd", type=float, default=0.01)
+    ap.add_argument("--pid_integral_min", type=float, default=-4.0)
+    ap.add_argument("--pid_integral_max", type=float, default=4.0)
+    ap.add_argument("--pid_output_max", type=float, default=0.03)
     ap.add_argument("--startup_force_sec", type=float, default=10.0)
     # online learning flags
     ap.add_argument("--rl_online_learning_enabled", action="store_true")
     ap.add_argument("--rl_online_update_interval_steps", type=int, default=200)
     ap.add_argument("--rl_online_min_buffer_steps", type=int, default=400)
     ap.add_argument("--rl_exploration_epsilon", type=float, default=0.25)
+    ap.add_argument(
+        "--rl_epsilon_schedule",
+        choices=["warmup_180", "constant"],
+        default="warmup_180",
+    )
     ap.add_argument("--rl_gamma", type=float, default=0.95)
     ap.add_argument("--rl_alpha", type=float, default=0.05)
     ap.add_argument("--rl_learning_rate", type=float, default=1e-4)
@@ -762,6 +785,15 @@ def main() -> int:
     args = ap.parse_args(normalized_argv)
     aimd_ai_step = max(0.0, float(args.aimd_ai_step))
     aimd_md_beta = clamp(float(args.aimd_md_beta), 0.0, 1.0)
+    pid_signal = str(args.pid_signal)
+    pid_signal_is_l0 = pid_signal == "l0"
+    pid_variant_id = "PID_L0" if pid_signal_is_l0 else "PID"
+    pid_policy_version_id = "pid_l0" if pid_signal_is_l0 else "pid_backlog"
+    pid_reason = "PID_L0" if pid_signal_is_l0 else "PID_BACKLOG"
+    pid_no_metric_reason = "PID_NO_L0" if pid_signal_is_l0 else "PID_NO_BACKLOG"
+    pid_integral_min = min(float(args.pid_integral_min), float(args.pid_integral_max))
+    pid_integral_max = max(float(args.pid_integral_min), float(args.pid_integral_max))
+    pid_output_max = max(0.0, float(args.pid_output_max))
 
     metrics_csv = args.poller_csv or args.metrics_csv
     if not metrics_csv:
@@ -795,7 +827,12 @@ def main() -> int:
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         online_learning = args.recover_controller_mode == "RL_DELTA_M"
-        variant_id = "RL_DELTA_M_ONLY" if online_learning else str(args.recover_controller_mode)
+        if online_learning:
+            variant_id = "RL_DELTA_M_ONLY"
+        elif args.recover_controller_mode == "PID":
+            variant_id = pid_variant_id
+        else:
+            variant_id = str(args.recover_controller_mode)
         run_duration_sec = float(args.timeout_sec)
         if run_duration_sec.is_integer():
             run_duration_sec = int(run_duration_sec)
@@ -811,6 +848,7 @@ def main() -> int:
                         "online_learning": online_learning,
                         "run_duration_sec": run_duration_sec,
                         "rl_exploration_epsilon": float(args.rl_exploration_epsilon),
+                        "rl_epsilon_schedule": str(args.rl_epsilon_schedule),
                         "rl_gamma": float(args.rl_gamma),
                         "rl_alpha": float(args.rl_alpha),
                         "soft_guard_enabled": bool(args.soft_guard_enabled),
@@ -850,6 +888,17 @@ def main() -> int:
                         "ladder": str(args.ladder),
                         "aimd_ai_step": aimd_ai_step,
                         "aimd_md_beta": aimd_md_beta,
+                        "pid_signal": pid_signal,
+                        "pid_backlog_target_bytes": float(args.pid_backlog_target_bytes),
+                        "pid_backlog_scale_bytes": float(args.pid_backlog_scale_bytes),
+                        "pid_l0_target_files": float(args.pid_l0_target_files),
+                        "pid_l0_scale_files": float(args.pid_l0_scale_files),
+                        "pid_kp": float(args.pid_kp),
+                        "pid_ki": float(args.pid_ki),
+                        "pid_kd": float(args.pid_kd),
+                        "pid_integral_min": pid_integral_min,
+                        "pid_integral_max": pid_integral_max,
+                        "pid_output_max": pid_output_max,
                     },
                     f,
                     indent=2,
@@ -898,6 +947,8 @@ def main() -> int:
     last_fifo_send_ts = None
     aimd_pending_decrease = False
     aimd_last_decrease_base = float(args.m_min)
+    pid_integral = 0.0
+    pid_prev_error = None
 
     try:
         with open(args.out_csv, "w", encoding="utf-8", newline="") as out_f:
@@ -944,6 +995,10 @@ def main() -> int:
                 "m_cmd_candidate",
                 "m_cmd_effective",
                 "m_applied",
+                "pid_error",
+                "pid_integral",
+                "pid_derivative",
+                "pid_output",
                 "r_total",
                 "r_stall",
                 "r_base",
@@ -1153,7 +1208,9 @@ def main() -> int:
                         soft_trigger_reason = "|".join(soft_trigger_reasons) if soft_trigger_reasons else "NONE"
 
                     time_since_start_sec = max(0.0, now - start_ts)
-                    if time_since_start_sec < 180.0:
+                    if args.rl_epsilon_schedule == "constant":
+                        q_agent.epsilon = float(args.rl_exploration_epsilon)
+                    elif time_since_start_sec < 180.0:
                         q_agent.epsilon = float(args.rl_exploration_epsilon)
                     else:
                         q_agent.epsilon = 0.1
@@ -1317,6 +1374,10 @@ def main() -> int:
                     delta_value = 0.0
                     m_target = -1.0
                     q_max = 0.0
+                    pid_error_log = 0.0
+                    pid_integral_log = pid_integral
+                    pid_derivative_log = 0.0
+                    pid_output_log = 0.0
                     actuation_gap = abs(float(m_applied) - float(last_cmd))
                     actuation_synced = actuation_gap <= float(args.fifo_resend_gap)
                     trainable = (
@@ -1331,15 +1392,21 @@ def main() -> int:
                     if startup_force_active:
                         reason = "STARTUP_FORCE"
                         m_candidate = args.m_min
+                        pid_integral = 0.0
+                        pid_prev_error = None
                     else:
                         semi_safe_floor = clamp(float(args.semi_safe_floor), args.m_min, args.m_max)
                         if fsm_state == "UNSAFE":
                             reason = "UNSAFE"
                             m_candidate = args.m_min
+                            pid_integral = 0.0
+                            pid_prev_error = None
                         elif fsm_state == "SEMI_SAFE":
                             reason = "SEMI_SAFE"
                             m_candidate = max(semi_safe_floor, float(last_cmd) - float(args.semi_safe_step))
                             m_candidate = min(m_candidate, float(args.soft_guard_cap_value))
+                            pid_integral = 0.0
+                            pid_prev_error = None
                         else:
                             if args.recover_controller_mode == "AIMD_STALL_ONLY":
                                 if aimd_pending_decrease:
@@ -1355,6 +1422,51 @@ def main() -> int:
                                     reason = "AIMD_INCREASE"
                                 delta_value = m_candidate - float(last_cmd)
                                 m_target = m_candidate
+                                pid_integral = 0.0
+                                pid_prev_error = None
+                            elif args.recover_controller_mode == "PID":
+                                pid_metric_present = l0_metric_present if pid_signal_is_l0 else backlog_metric_present
+                                if pid_metric_present:
+                                    pid_dt = tick_dt if tick_dt > 0.0 else max(float(args.period_sec), 1e-6)
+                                    if pid_signal_is_l0:
+                                        pid_measure = float(l0_files)
+                                        pid_target = float(args.pid_l0_target_files)
+                                        pid_scale = max(1.0, float(args.pid_l0_scale_files))
+                                    else:
+                                        pid_measure = float(backlog)
+                                        pid_target = float(args.pid_backlog_target_bytes)
+                                        pid_scale = max(1.0, float(args.pid_backlog_scale_bytes))
+                                    pid_error = (pid_target - pid_measure) / pid_scale
+                                    pid_integral = clamp(
+                                        pid_integral + pid_error * pid_dt,
+                                        pid_integral_min,
+                                        pid_integral_max,
+                                    )
+                                    pid_derivative = 0.0
+                                    if pid_prev_error is not None and pid_dt > 0.0:
+                                        pid_derivative = (pid_error - pid_prev_error) / pid_dt
+                                    pid_output = (
+                                        float(args.pid_kp) * pid_error
+                                        + float(args.pid_ki) * pid_integral
+                                        + float(args.pid_kd) * pid_derivative
+                                    )
+                                    pid_output = clamp(pid_output, -pid_output_max, pid_output_max)
+                                    pid_prev_error = pid_error
+                                    pid_error_log = pid_error
+                                    pid_integral_log = pid_integral
+                                    pid_derivative_log = pid_derivative
+                                    pid_output_log = pid_output
+                                    delta_value = pid_output
+                                    m_target = clamp(float(last_cmd) + pid_output, args.m_min, args.m_max)
+                                    m_candidate = m_target
+                                    reason = pid_reason
+                                else:
+                                    pid_integral = 0.0
+                                    pid_prev_error = None
+                                    pid_integral_log = pid_integral
+                                    m_candidate = float(last_cmd)
+                                    m_target = m_candidate
+                                    reason = pid_no_metric_reason
                             elif trainable:
                                 action_idx, qs = q_agent.select_action(s_t)
                                 q_max = float(np.max(qs)) if qs.size > 0 else 0.0
@@ -1372,6 +1484,8 @@ def main() -> int:
                                 m_candidate = float(last_cmd)
                                 m_target = m_candidate
                                 reason = "SAFE_NO_RL"
+                                pid_integral = 0.0
+                                pid_prev_error = None
 
                     m_candidate = clamp(float(m_candidate), args.m_min, args.m_max)
                     if m_target < 0.0:
@@ -1438,11 +1552,12 @@ def main() -> int:
                         prev_done = None
                         prev_is_trainable = False
 
-                    policy_version_id = (
-                        "linear_q"
-                        if args.recover_controller_mode == "RL_DELTA_M"
-                        else "aimd_stall_only"
-                    )
+                    if args.recover_controller_mode == "RL_DELTA_M":
+                        policy_version_id = "linear_q"
+                    elif args.recover_controller_mode == "AIMD_STALL_ONLY":
+                        policy_version_id = "aimd_stall_only"
+                    else:
+                        policy_version_id = pid_policy_version_id
     
                     # Send command to RocksDB via FIFO using send-on-change semantics.
                     # Also resend periodically (heartbeat) and on observed apply mismatch.
@@ -1512,6 +1627,10 @@ def main() -> int:
                     q_selected_str = f"{q_selected:.6f}"
                     q_max_str = f"{q_max:.6f}"
                     td_error_str = f"{td_error:.6f}"
+                    pid_error_str = f"{pid_error_log:.6f}"
+                    pid_integral_str = f"{pid_integral_log:.6f}"
+                    pid_derivative_str = f"{pid_derivative_log:.6f}"
+                    pid_output_str = f"{pid_output_log:.6f}"
                     write_stall_delta_count_str = (
                         f"{write_stall_delta_count_log:.0f}" if write_stall_delta_count_log >= 0.0 else "-1"
                     )
@@ -1571,6 +1690,10 @@ def main() -> int:
                     f"{m_candidate:.3f}",
                     f"{m_cmd_effective:.3f}",
                     f"{m_applied:.3f}",
+                    pid_error_str,
+                    pid_integral_str,
+                    pid_derivative_str,
+                    pid_output_str,
                     f"{r_total:.3f}",
                     f"{r_stall:.3f}",
                     f"{r_base:.3f}",

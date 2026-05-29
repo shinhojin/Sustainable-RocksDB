@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 TS=$(date +%m%d_%H%M%S)
-OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_aimd_stall_only_${TS}"}
+OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_pid_backlog_${TS}"}
 # 12 hours
 DURATION_SEC=${DURATION_SEC:-43200}
 
@@ -18,9 +18,15 @@ VALUE_SIZE=${VALUE_SIZE:-1024}
 M_MIN=${M_MIN:-0.01}
 M_MAX=${M_MAX:-0.5}
 
-# AIMD defaults
-AIMD_AI_STEP=${AIMD_AI_STEP:-0.005}
-AIMD_MD_BETA=${AIMD_MD_BETA:-0.7}
+# PID defaults
+PID_BACKLOG_TARGET_BYTES=${PID_BACKLOG_TARGET_BYTES:-12000000000}
+PID_BACKLOG_SCALE_BYTES=${PID_BACKLOG_SCALE_BYTES:-10000000000}
+PID_KP=${PID_KP:-0.03}
+PID_KI=${PID_KI:-0.006}
+PID_KD=${PID_KD:-0.012}
+PID_INTEGRAL_MIN=${PID_INTEGRAL_MIN:--5.0}
+PID_INTEGRAL_MAX=${PID_INTEGRAL_MAX:-5.0}
+PID_OUTPUT_MAX=${PID_OUTPUT_MAX:-0.04}
 RECOVER_FREE_SEC=${RECOVER_FREE_SEC:-30}
 
 # Safety / controller defaults
@@ -30,9 +36,6 @@ DELTA_SMOOTH_ETA=${DELTA_SMOOTH_ETA:-0.18}
 GAMMA_M=${GAMMA_M:-1.8}
 RISK_BACKLOG_EPS=${RISK_BACKLOG_EPS:-0.18}
 RISK_LATENCY_EPS=${RISK_LATENCY_EPS:-0.15}
-
-# Pure AIMD baseline: disable soft-guard by default, but allow overriding.
-SOFT_GUARD_ENABLED=${SOFT_GUARD_ENABLED:-0}
 SOFT_GUARD_CAP_VALUE=${SOFT_GUARD_CAP_VALUE:-0.06}
 
 # Near-stall / release defaults
@@ -62,7 +65,7 @@ EXTRA_AGENT_ARGS=()
 
 usage() {
   cat <<'USAGE'
-Usage: ./run_agent_aimd_stall_only.sh [options] [-- <extra args for run_agent_fifo.sh>]
+Usage: ./run_agent_pid_backlog.sh [options] [-- <extra args for run_agent_fifo.sh>]
 
 Options:
   --outdir PATH
@@ -74,11 +77,15 @@ Options:
   --value_size N
   --m_min N
   --m_max N
-  --aimd_ai_step N
-  --aimd_md_beta N
+  --pid_backlog_target_bytes N
+  --pid_backlog_scale_bytes N
+  --pid_kp N
+  --pid_ki N
+  --pid_kd N
+  --pid_integral_min N
+  --pid_integral_max N
+  --pid_output_max N
   --recover_free_sec N
-  --soft_guard_enabled
-  --soft_guard_disabled
   --no-clear-db
   --no-copy-db-log
   -h, --help
@@ -87,14 +94,14 @@ USAGE
 
 clear_db() {
   if [[ -z "$DB_PATH" || "$DB_PATH" == "/" || "$DB_PATH" == "." ]]; then
-    echo "[aimd] skip db cleanup: unsafe DB_PATH=$DB_PATH" >&2
+    echo "[pid] skip db cleanup: unsafe DB_PATH=$DB_PATH" >&2
     return 1
   fi
   if [[ ! -d "$DB_PATH" ]]; then
-    echo "[aimd] skip db cleanup: DB_PATH not found ($DB_PATH)" >&2
+    echo "[pid] skip db cleanup: DB_PATH not found ($DB_PATH)" >&2
     return 0
   fi
-  echo "[aimd] cleaning DB_PATH=$DB_PATH"
+  echo "[pid] cleaning DB_PATH=$DB_PATH"
   if [[ -n "$SUDO_CMD" ]]; then
     $SUDO_CMD find "$DB_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   else
@@ -106,21 +113,21 @@ copy_db_log() {
   local src="$DB_PATH/LOG"
   local dst="$OUTDIR/db_LOG"
   if [[ ! -f "$src" ]]; then
-    echo "[aimd] WARN: DB LOG not found at $src"
+    echo "[pid] WARN: DB LOG not found at $src"
     return 0
   fi
   if cp "$src" "$dst" 2>/dev/null; then
-    echo "[aimd] copied DB LOG -> $dst"
+    echo "[pid] copied DB LOG -> $dst"
     return 0
   fi
   if [[ -n "$SUDO_CMD" ]] && $SUDO_CMD test -f "$src"; then
     if $SUDO_CMD cp "$src" "$dst"; then
       $SUDO_CMD chown "$(id -u):$(id -g)" "$dst" 2>/dev/null || true
-      echo "[aimd] copied DB LOG with sudo -> $dst"
+      echo "[pid] copied DB LOG with sudo -> $dst"
       return 0
     fi
   fi
-  echo "[aimd] WARN: failed to copy DB LOG from $src"
+  echo "[pid] WARN: failed to copy DB LOG from $src"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -134,11 +141,15 @@ while [[ $# -gt 0 ]]; do
     --value_size) VALUE_SIZE="$2"; shift 2;;
     --m_min) M_MIN="$2"; shift 2;;
     --m_max) M_MAX="$2"; shift 2;;
-    --aimd_ai_step) AIMD_AI_STEP="$2"; shift 2;;
-    --aimd_md_beta) AIMD_MD_BETA="$2"; shift 2;;
+    --pid_backlog_target_bytes) PID_BACKLOG_TARGET_BYTES="$2"; shift 2;;
+    --pid_backlog_scale_bytes) PID_BACKLOG_SCALE_BYTES="$2"; shift 2;;
+    --pid_kp) PID_KP="$2"; shift 2;;
+    --pid_ki) PID_KI="$2"; shift 2;;
+    --pid_kd) PID_KD="$2"; shift 2;;
+    --pid_integral_min) PID_INTEGRAL_MIN="$2"; shift 2;;
+    --pid_integral_max) PID_INTEGRAL_MAX="$2"; shift 2;;
+    --pid_output_max) PID_OUTPUT_MAX="$2"; shift 2;;
     --recover_free_sec) RECOVER_FREE_SEC="$2"; shift 2;;
-    --soft_guard_enabled) SOFT_GUARD_ENABLED=1; shift 1;;
-    --soft_guard_disabled) SOFT_GUARD_ENABLED=0; shift 1;;
     --no-clear-db) CLEAR_DB_BEFORE=0; shift 1;;
     --no-copy-db-log) COPY_DB_LOG=0; shift 1;;
     --) shift; EXTRA_AGENT_ARGS+=("$@"); break;;
@@ -149,22 +160,18 @@ done
 
 mkdir -p "$OUTDIR"
 
-echo "[aimd] OUTDIR=$OUTDIR"
-echo "[aimd] DURATION_SEC=$DURATION_SEC"
-echo "[aimd] DB_PATH=$DB_PATH"
-echo "[aimd] OPTIONS_FILE=$OPTIONS_FILE"
-echo "[aimd] RL_POLLER_BIN=$RL_POLLER_BIN"
-echo "[aimd] M_MIN=$M_MIN M_MAX=$M_MAX"
-echo "[aimd] AIMD_AI_STEP=$AIMD_AI_STEP AIMD_MD_BETA=$AIMD_MD_BETA"
-echo "[aimd] SOFT_GUARD_ENABLED=$SOFT_GUARD_ENABLED"
+echo "[pid] OUTDIR=$OUTDIR"
+echo "[pid] DURATION_SEC=$DURATION_SEC"
+echo "[pid] DB_PATH=$DB_PATH"
+echo "[pid] OPTIONS_FILE=$OPTIONS_FILE"
+echo "[pid] RL_POLLER_BIN=$RL_POLLER_BIN"
+echo "[pid] M_MIN=$M_MIN M_MAX=$M_MAX"
+echo "[pid] PID_TARGET=$PID_BACKLOG_TARGET_BYTES PID_SCALE=$PID_BACKLOG_SCALE_BYTES"
+echo "[pid] PID_KP=$PID_KP PID_KI=$PID_KI PID_KD=$PID_KD"
+echo "[pid] PID_I_MIN=$PID_INTEGRAL_MIN PID_I_MAX=$PID_INTEGRAL_MAX PID_U_MAX=$PID_OUTPUT_MAX"
 
 if [[ "$CLEAR_DB_BEFORE" -eq 1 ]]; then
   clear_db
-fi
-
-SOFT_GUARD_FLAG=("--soft_guard_disabled")
-if [[ "$SOFT_GUARD_ENABLED" -eq 1 ]]; then
-  SOFT_GUARD_FLAG=("--soft_guard_enabled")
 fi
 
 "$SCRIPT_DIR/run_agent_fifo.sh" \
@@ -174,13 +181,19 @@ fi
   --rl_poller_bin "$RL_POLLER_BIN" \
   --write_mb_per_sec "$WRITE_MB_PER_SEC" \
   --value_size "$VALUE_SIZE" \
+  --duration-sec "$DURATION_SEC" \
   --m_min "$M_MIN" \
   --m_max "$M_MAX" \
-  --duration-sec "$DURATION_SEC" \
-  --recover_controller_mode AIMD_STALL_ONLY \
-  "${SOFT_GUARD_FLAG[@]}" \
-  --aimd_ai_step "$AIMD_AI_STEP" \
-  --aimd_md_beta "$AIMD_MD_BETA" \
+  --recover_controller_mode PID \
+  --soft_guard_enabled \
+  --pid_backlog_target_bytes "$PID_BACKLOG_TARGET_BYTES" \
+  --pid_backlog_scale_bytes "$PID_BACKLOG_SCALE_BYTES" \
+  --pid_kp "$PID_KP" \
+  --pid_ki "$PID_KI" \
+  --pid_kd "$PID_KD" \
+  --pid_integral_min "$PID_INTEGRAL_MIN" \
+  --pid_integral_max "$PID_INTEGRAL_MAX" \
+  --pid_output_max "$PID_OUTPUT_MAX" \
   --gamma_perf "$GAMMA_M" \
   --risk_backlog_eps "$RISK_BACKLOG_EPS" \
   --risk_latency_eps "$RISK_LATENCY_EPS" \
@@ -212,10 +225,10 @@ if [[ "$COPY_DB_LOG" -eq 1 ]]; then
   copy_db_log
 fi
 
-echo "[aimd] done"
-echo "[aimd] agent_log: $OUTDIR/agent_log.csv"
-echo "[aimd] agent_stdout: $OUTDIR/agent_rl_fifo.log"
-echo "[aimd] poller_log: $OUTDIR/poller.log"
-echo "[aimd] metrics: $OUTDIR/rl_metrics.csv"
-echo "[aimd] resource: $OUTDIR/resource_usage.csv"
-echo "[aimd] db_LOG: $OUTDIR/db_LOG"
+echo "[pid] done"
+echo "[pid] agent_log: $OUTDIR/agent_log.csv"
+echo "[pid] agent_stdout: $OUTDIR/agent_rl_fifo.log"
+echo "[pid] poller_log: $OUTDIR/poller.log"
+echo "[pid] metrics: $OUTDIR/rl_metrics.csv"
+echo "[pid] resource: $OUTDIR/resource_usage.csv"
+echo "[pid] db_LOG: $OUTDIR/db_LOG"

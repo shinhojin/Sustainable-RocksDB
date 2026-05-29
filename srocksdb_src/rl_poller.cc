@@ -820,12 +820,16 @@ class ZipfGenerator {
 enum class YcsbWorkload {
   kNone,
   kLoad,
+  kLoadUniform,
   kA,
   kB,
   kC,
   kD,
   kE,
   kF,
+  kR10W90,
+  kR90W10,
+  kR50W50,
 };
 
 static bool ParseYcsbWorkload(const std::string& value, YcsbWorkload* out) {
@@ -836,6 +840,10 @@ static bool ParseYcsbWorkload(const std::string& value, YcsbWorkload* out) {
   }
   if (w == "load") {
     *out = YcsbWorkload::kLoad;
+    return true;
+  }
+  if (w == "load_uniform" || w == "load_uniform_random") {
+    *out = YcsbWorkload::kLoadUniform;
     return true;
   }
   if (w == "a") {
@@ -862,6 +870,18 @@ static bool ParseYcsbWorkload(const std::string& value, YcsbWorkload* out) {
     *out = YcsbWorkload::kF;
     return true;
   }
+  if (w == "r10w90") {
+    *out = YcsbWorkload::kR10W90;
+    return true;
+  }
+  if (w == "r90w10") {
+    *out = YcsbWorkload::kR90W10;
+    return true;
+  }
+  if (w == "r50w50") {
+    *out = YcsbWorkload::kR50W50;
+    return true;
+  }
   return false;
 }
 
@@ -869,6 +889,8 @@ static const char* YcsbWorkloadName(YcsbWorkload w) {
   switch (w) {
     case YcsbWorkload::kLoad:
       return "load";
+    case YcsbWorkload::kLoadUniform:
+      return "load_uniform";
     case YcsbWorkload::kA:
       return "a";
     case YcsbWorkload::kB:
@@ -881,6 +903,12 @@ static const char* YcsbWorkloadName(YcsbWorkload w) {
       return "e";
     case YcsbWorkload::kF:
       return "f";
+    case YcsbWorkload::kR10W90:
+      return "r10w90";
+    case YcsbWorkload::kR90W10:
+      return "r90w10";
+    case YcsbWorkload::kR50W50:
+      return "r50w50";
     case YcsbWorkload::kNone:
     default:
       return "none";
@@ -1035,18 +1063,68 @@ static void YcsbThread(rocksdb::DB* db, YcsbWorkload workload,
   };
 
   if (workload == YcsbWorkload::kLoad) {
+    const auto deadline =
+        (duration_sec > 0)
+            ? (std::chrono::steady_clock::now() + std::chrono::seconds(duration_sec))
+            : std::chrono::steady_clock::time_point::max();
     const uint64_t end =
         std::max<uint64_t>(1, std::min<uint64_t>(record_count, max_key_id_i32));
-    for (uint64_t i = 1; i <= end && !g_stop.load(); ++i) {
+    uint64_t next_key_id = 1;
+    while (!g_stop.load()) {
+      if (duration_sec > 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          LogStderrLine("[ycsb] load duration completed");
+          break;
+        }
+        if (next_key_id > max_key_id_i32) {
+          LogStderrLine("[ycsb] load reached max key id before duration completed");
+          break;
+        }
+      } else if (next_key_id > end) {
+        LogStderrLine("[ycsb] load completed");
+        break;
+      }
       const auto op_start = std::chrono::steady_clock::now();
-      DoPut(i);
+      DoPut(next_key_id++);
       const auto latency_us = static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::steady_clock::now() - op_start)
               .count());
       RecordYcsbLogicalOpLatencyUs(latency_us);
     }
-    LogStderrLine("[ycsb] load completed");
+    g_stop.store(true);
+    return;
+  }
+
+  if (workload == YcsbWorkload::kLoadUniform) {
+    const auto deadline =
+        (duration_sec > 0)
+            ? (std::chrono::steady_clock::now() + std::chrono::seconds(duration_sec))
+            : std::chrono::steady_clock::time_point::max();
+    const uint64_t max_key =
+        std::max<uint64_t>(1, std::min<uint64_t>(record_count, max_key_id_i32));
+    const uint64_t total_ops = std::max<uint64_t>(1, operation_count);
+    std::uniform_int_distribution<uint64_t> key_dist(1, max_key);
+    uint64_t op = 0;
+    while (!g_stop.load()) {
+      if (duration_sec > 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          LogStderrLine("[ycsb] load_uniform duration completed");
+          break;
+        }
+      } else if (op >= total_ops) {
+        LogStderrLine("[ycsb] load_uniform operation_count completed");
+        break;
+      }
+      const auto op_start = std::chrono::steady_clock::now();
+      DoPut(key_dist(rng));
+      const auto latency_us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - op_start)
+              .count());
+      RecordYcsbLogicalOpLatencyUs(latency_us);
+      ++op;
+    }
     g_stop.store(true);
     return;
   }
@@ -1118,6 +1196,24 @@ static void YcsbThread(rocksdb::DB* db, YcsbWorkload workload,
         DoRead(key_id);
         DoPut(key_id);
       }
+    } else if (workload == YcsbWorkload::kR10W90) {
+      if (next < 10) {
+        DoRead(key_id);
+      } else {
+        DoPut(key_id);
+      }
+    } else if (workload == YcsbWorkload::kR90W10) {
+      if (next < 90) {
+        DoRead(key_id);
+      } else {
+        DoPut(key_id);
+      }
+    } else if (workload == YcsbWorkload::kR50W50) {
+      if (next < 50) {
+        DoRead(key_id);
+      } else {
+        DoPut(key_id);
+      }
     }
     const auto latency_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1141,7 +1237,7 @@ int main(int argc, char** argv) {
         << " [--fixed_key_16=<0|1>]"
         << " [--create_if_missing=<0|1>]"
         << " [--cmd_fifo=/tmp/rl_cmd.fifo]\n\n"
-        << " [--ycsb_workload=<load|a|b|c|d|e|f>]"
+        << " [--ycsb_workload=<load|load_uniform|a|b|c|d|e|f|r10w90|r90w10|r50w50>]"
         << " [--ycsb_record_count=<uint64>]"
         << " [--ycsb_operation_count=<uint64>]"
         << " [--ycsb_duration_sec=<uint64>]"
