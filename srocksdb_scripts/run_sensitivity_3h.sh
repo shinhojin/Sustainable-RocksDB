@@ -11,7 +11,7 @@ OUTROOT=${OUTROOT:-"$REPO_ROOT/srocksdb_evaluation/sensitivity_3h_${TS}"}
 DURATION_SEC=${DURATION_SEC:-10800}
 
 DB_PATH=${DB_PATH:-/mnt/f2fs/rlrocksdb_log}
-OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_a.ini"}
+OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_s.ini"}
 RL_POLLER_BIN=${RL_POLLER_BIN:-"$REPO_ROOT/rl_poller"}
 
 WRITE_MB_PER_SEC=${WRITE_MB_PER_SEC:-500}

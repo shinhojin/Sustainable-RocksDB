@@ -7,7 +7,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 TS=$(date +%m%d_%H%M%S)
 OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/ycsb_${TS}"}
 DB_PATH=${DB_PATH:-/mnt/f2fs/rlrocksdb_log}
-OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_a.ini"}
+OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_s.ini"}
 RL_POLLER_BIN=${RL_POLLER_BIN:-"$REPO_ROOT/rl_poller"}
 
 LOAD_RECORD_COUNT=${LOAD_RECORD_COUNT:-50000000}

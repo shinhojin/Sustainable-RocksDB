@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 TS=$(date +%m%d_%H%M%S)
-#OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_rl_lq_nvme_${TS}"}
+# OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_rl_lq_nvme_${TS}"}
 OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_rl_lq_${TS}"}
 
 # 24 hours
@@ -25,22 +25,22 @@ DB_PATH=${DB_PATH:-/mnt/f2fs/rlrocksdb_log}
 RL_POLLER_BIN=${RL_POLLER_BIN:-"$REPO_ROOT/rl_poller"}
 
 # NVMe SSD - 3000 MB/s write
-#WRITE_MB_PER_SEC=${WRITE_MB_PER_SEC:-3000}
+WRITE_MB_PER_SEC=${WRITE_MB_PER_SEC:-3000}
 
 # SATA SSD - 500 MB/s write
-WRITE_MB_PER_SEC=${WRITE_MB_PER_SEC:-500}
+# WRITE_MB_PER_SEC=${WRITE_MB_PER_SEC:-500}
 
 VALUE_SIZE=${VALUE_SIZE:-1024}
 
-# S-RocksDB(C)
-OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_c.ini"}
-M_MIN=${M_MIN:-0.01}
-M_MAX=${M_MAX:-0.2}
-
-# S-RocksDB(A)
-# OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_a.ini"}
+# S-RocksDB(R)
+# OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_r.ini"}
 # M_MIN=${M_MIN:-0.01}
-# M_MAX=${M_MAX:-0.5}
+# M_MAX=${M_MAX:-0.2}
+
+# S-RocksDB(S)
+OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_s.ini"}
+M_MIN=${M_MIN:-0.01}
+M_MAX=${M_MAX:-0.5}
 
 # Controller defaults
 DELTA_ACTIONS=${DELTA_ACTIONS:-"-0.02,-0.01,0,0.01,0.02"}

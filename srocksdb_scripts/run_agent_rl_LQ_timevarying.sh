@@ -9,7 +9,8 @@ TS=$(date +%m%d_%H%M%S)
 OUTDIR=${OUTDIR:-"$REPO_ROOT/srocksdb_evaluation/agent_rl_lq_timevarying_${TS}"}
 
 DB_PATH=${DB_PATH:-/mnt/f2fs/rlrocksdb_log}
-OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_a.ini"}
+OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_r.ini"}
+# OPTIONS_FILE=${OPTIONS_FILE:-"$REPO_ROOT/srocksdb_options/rl_options_s.ini"}
 RL_POLLER_BIN=${RL_POLLER_BIN:-"$REPO_ROOT/rl_poller"}
 
 LOAD_RECORD_COUNT=${LOAD_RECORD_COUNT:-$INT32_KEYSPACE_MAX}
@@ -28,7 +29,10 @@ PHASE2_WORKLOAD=${PHASE2_WORKLOAD:-r90w10}
 PHASE3_WORKLOAD=${PHASE3_WORKLOAD:-r50w50}
 
 M_MIN=${M_MIN:-0.01}
-M_MAX=${M_MAX:-0.5}
+
+# M_MAX=${M_MAX:-0.5}
+M_MAX=${M_MAX:-0.2}
+
 VALUE_SIZE=${VALUE_SIZE:-1024}
 KEY_PREFIX=${KEY_PREFIX:-k}
 FIXED_KEY_16=${FIXED_KEY_16:-1}

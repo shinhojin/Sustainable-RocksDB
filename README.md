@@ -21,8 +21,8 @@ Core S-RocksDB files:
 - `srocksdb_src/agent_rl_fifo.py`
   - external controller
   - reads poller metrics, classifies runtime state, and sends commands to the FIFO
-- `srocksdb_options/rl_options_a.ini`
-- `srocksdb_options/rl_options_c.ini`
+- `srocksdb_options/rl_options_s.ini`
+- `srocksdb_options/rl_options_r.ini`
   - example option presets with metrics and write throttling enabled
 - `srocksdb_scripts/run_agent_fifo.sh`
   - low-level launcher that starts both `rl_poller` and `agent_rl_fifo.py`
@@ -124,17 +124,17 @@ Current defaults in the script:
 
 - output root: `srocksdb_evaluation/agent_rl_lq_<timestamp>`
 - duration: `43200` seconds
-- options file: `srocksdb_options/rl_options_c.ini`
+- options file: `srocksdb_options/rl_options_s.ini`
 - write rate: `500 MB/s`
 - `m_min=0.01`
-- `m_max=0.2`
+- `m_max=0.5`
 
 Example:
 
 ```bash
 bash srocksdb_scripts/run_agent_rl_LQ.sh \
   --db_path /path/to/db \
-  --options_file "$PWD/srocksdb_options/rl_options_c.ini" \
+  --options_file "$PWD/srocksdb_options/rl_options_s.ini" \
   --outdir /path/to/out/agent_rl_lq_$(date +%m%d_%H%M%S) \
   --duration-sec 43200 \
   --write_mb_per_sec 500 \
@@ -147,7 +147,7 @@ If you want to keep the current DB contents:
 bash srocksdb_scripts/run_agent_rl_LQ.sh \
   --no-clear-db \
   --db_path /path/to/db \
-  --options_file "$PWD/srocksdb_options/rl_options_c.ini" \
+  --options_file "$PWD/srocksdb_options/rl_options_s.ini" \
   --outdir /path/to/out/no_clear_$(date +%m%d_%H%M%S)
 ```
 
@@ -162,7 +162,7 @@ bash srocksdb_scripts/run_agent_rl_LQ.sh \
 
 Current defaults in the script:
 
-- options file: `srocksdb_options/rl_options_a.ini`
+- options file: `srocksdb_options/rl_options_s.ini`
 - `LOAD_RECORD_COUNT=50000000`
 - `RUN_DURATION_SEC=3600`
 - `LOAD_WITH_AGENT=1`
@@ -172,7 +172,7 @@ Example:
 ```bash
 bash srocksdb_scripts/run_agent_rl_ycsb.sh \
   --db_path /path/to/db \
-  --options_file "$PWD/srocksdb_options/rl_options_a.ini" \
+  --options_file "$PWD/srocksdb_options/rl_options_s.ini" \
   --outdir /path/to/out/ycsb_$(date +%m%d_%H%M%S) \
   --load_record_count 50000000 \
   --run_duration_sec 3600 \
@@ -290,13 +290,13 @@ YCSB and time-varying runners create nested per-phase / per-workload directories
 
 The repository currently includes two example option presets:
 
-- `srocksdb_options/rl_options_a.ini`
-- `srocksdb_options/rl_options_c.ini`
+- `srocksdb_options/rl_options_s.ini`
+- `srocksdb_options/rl_options_r.ini`
 
 Both enable the custom metrics path and write throttling. The current scripts use them as follows:
 
-- `run_agent_rl_LQ.sh` defaults to `rl_options_c.ini`
-- `run_agent_rl_ycsb.sh`, `run_agent_rl_LQ_timevarying.sh`, and the baseline runners default to `rl_options_a.ini`
+- `run_agent_rl_LQ.sh` defaults to `rl_options_r.ini`
+- `run_agent_rl_ycsb.sh`, `run_agent_rl_LQ_timevarying.sh`, and the baseline runners default to `rl_options_s.ini`
 
 ## License
 
